@@ -429,7 +429,7 @@
   /* LN INVOICE */
   #lnInvoiceArea { margin-top: 16px; }
   .qr-wrap {
-    background: #fff; padding: 12px; border-radius: 12px;
+    background: #fff; padding: 18px; border-radius: 12px;
     width: max-content; margin: 0 auto 14px;
     box-shadow: 0 0 24px rgba(247,147,26,0.25);
   }
@@ -468,6 +468,21 @@
     border: 1px solid rgba(220,38,38,0.3); border-radius: 8px;
     padding: 10px 12px; margin-top: 12px; line-height: 1.5;
   }
+
+  /* ETH STATUS */
+  #ethStatusArea { margin-top: 16px; }
+  #ethStatusArea .ln-spinner {
+    border-color: rgba(168,85,247,0.3); border-top-color: var(--purple-bright);
+  }
+  #ethStatusArea .ln-status.paid { color: var(--purple-glow); }
+  .eth-inv-btn {
+    display: inline-block; text-decoration: none; width: 100%; text-align: center;
+    border: 1px solid var(--border); background: rgba(168,85,247,0.08);
+    color: var(--purple-glow); padding: 10px; border-radius: 8px;
+    font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 0.78rem;
+    margin-bottom: 12px; transition: all 0.2s;
+  }
+  .eth-inv-btn:hover { background: rgba(168,85,247,0.18); }
 
   /* FOOTER */
   footer {
@@ -714,10 +729,11 @@
           <span class="lbl">Amount</span>
           <span class="amt amt-eth" id="mEth">0.008 ETH</span>
         </div>
-        <div class="relay-note">⚡ Payment event broadcast to 12 Nostr relays</div>
-        <button class="pay-action eth-action" id="ethBtn" onclick="simulatePay('eth')">
+        <div class="relay-note" id="ethNetNote">⟠ Real on-chain payment via your wallet</div>
+        <button class="pay-action eth-action" id="ethBtn" onclick="payWithEth()">
           ⟠ Connect Wallet & Pay
         </button>
+        <div id="ethStatusArea"></div>
       </div>
 
     </div>
@@ -738,10 +754,15 @@
 <script>
   const LN = 'erna@getalby.com';
   const ETH_ADDR = '0x1E7c6338431d1C6326053F9355eb1812A8b673BF';
+  const REQUIRED_CHAIN = '0xaa36a7';     // Active network — change to '0x1' (Ethereum), '0x2105' (Base), '0xaa36a7' (Sepolia)
+  const REQUIRED_NAME = 'Sepolia testnet';
   let currentTab = 'btc';
   let currentSats = 0;
+  let currentEth = '0';
   let currentInvoice = '';
   let lnPollTimer = null;
+  let ethPollTimer = null;
+  let ethTxHash = '';
 
   function openModal(name, icon, sats, eth, tab) {
     document.getElementById('mName').textContent = name;
@@ -749,6 +770,7 @@
     document.getElementById('mSats').textContent = sats + ' sats';
     document.getElementById('mEth').textContent = eth + ' ETH';
     currentSats = parseInt(String(sats).replace(/[^0-9]/g, ''), 10) || 0;
+    currentEth = String(eth).replace(/[^0-9.]/g, '') || '0';
     document.getElementById('payBody').style.display = 'block';
     document.getElementById('successDiv').classList.remove('on');
     resetBtns();
@@ -775,6 +797,7 @@
 
   function stopPolling() {
     if (lnPollTimer) { clearInterval(lnPollTimer); lnPollTimer = null; }
+    if (ethPollTimer) { clearInterval(ethPollTimer); ethPollTimer = null; }
   }
 
   function resetBtns() {
@@ -784,9 +807,10 @@
     lb.textContent = '⚡ Generate Lightning Invoice';
     eb.textContent = '⟠ Connect Wallet & Pay';
     lb.disabled = false; eb.disabled = false;
-    lb.style.display = '';
-    currentInvoice = '';
+    lb.style.display = ''; eb.style.display = '';
+    currentInvoice = ''; ethTxHash = '';
     document.getElementById('lnInvoiceArea').innerHTML = '';
+    document.getElementById('ethStatusArea').innerHTML = '';
   }
 
   /* ---------- REAL LIGHTNING (LNURL-pay, LUD-16 + LUD-21) ---------- */
@@ -856,8 +880,8 @@
       '<div class="ln-status" id="lnStatus"><span class="ln-spinner"></span> Waiting for payment…</div>';
     new QRCode(document.getElementById('qrcode'), {
       text: pr.toUpperCase(),
-      width: 200, height: 200,
-      correctLevel: QRCode.CorrectLevel.M
+      width: 264, height: 264,
+      correctLevel: QRCode.CorrectLevel.L
     });
   }
 
@@ -903,23 +927,192 @@
     document.getElementById('successDiv').classList.add('on');
   }
 
-  /* ---------- ETH (unchanged demo flow) ---------- */
-  function simulatePay(type) {
-    const btn = document.getElementById('ethBtn');
-    btn.textContent = '⟠ Connecting wallet...';
-    btn.disabled = true;
+  /* ---------- REAL ETHEREUM (injected wallet, on-chain tx) ---------- */
 
-    setTimeout(() => {
-      document.getElementById('payBody').style.display = 'none';
-      const sIcon = document.getElementById('sIcon');
-      sIcon.className = 's-icon s-eth';
-      sIcon.textContent = '✓';
+  const CHAINS = {
+    '0x1':       { name: 'Ethereum',        explorer: 'https://etherscan.io' },
+    '0xaa36a7':  { name: 'Sepolia',         explorer: 'https://sepolia.etherscan.io' },
+    '0x89':      { name: 'Polygon',         explorer: 'https://polygonscan.com' },
+    '0x2105':    { name: 'Base',            explorer: 'https://basescan.org' },
+    '0xa':       { name: 'Optimism',        explorer: 'https://optimistic.etherscan.io' },
+    '0xa4b1':    { name: 'Arbitrum',        explorer: 'https://arbiscan.io' }
+  };
 
-      const hash = '0x' + Array.from({length:64},()=>'0123456789abcdef'[Math.floor(Math.random()*16)]).join('');
-      document.getElementById('txBox').textContent = 'TX: ' + hash;
-      document.getElementById('successDiv').classList.add('on');
-    }, 2000);
+  // EIP-3085 params so a wallet can ADD the network if it doesn't have it yet.
+  const CHAIN_PARAMS = {
+    '0x1': {
+      chainId: '0x1', chainName: 'Ethereum Mainnet',
+      nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+      rpcUrls: ['https://eth.llamarpc.com', 'https://cloudflare-eth.com'],
+      blockExplorerUrls: ['https://etherscan.io']
+    },
+    '0x2105': {
+      chainId: '0x2105', chainName: 'Base',
+      nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+      rpcUrls: ['https://mainnet.base.org'],
+      blockExplorerUrls: ['https://basescan.org']
+    },
+    '0xaa36a7': {
+      chainId: '0xaa36a7', chainName: 'Sepolia',
+      nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
+      rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com', 'https://rpc.sepolia.org'],
+      blockExplorerUrls: ['https://sepolia.etherscan.io']
+    }
+  };
+
+  function ethToWeiHex(ethStr) {
+    const [whole, frac = ''] = String(ethStr).trim().split('.');
+    const fracPadded = (frac + '0'.repeat(18)).slice(0, 18);
+    const wei = BigInt(whole || '0') * (10n ** 18n) + BigInt(fracPadded || '0');
+    return '0x' + wei.toString(16);
   }
+
+  function explorerTxUrl(chainId, txHash) {
+    const c = CHAINS[chainId];
+    return c ? c.explorer + '/tx/' + txHash : null;
+  }
+
+  // Guardrail: make sure the wallet is on the required network before sending.
+  async function ensureEthNetwork() {
+    let chainId = await window.ethereum.request({ method: 'eth_chainId' });
+    if (chainId === REQUIRED_CHAIN) return chainId;
+
+    document.getElementById('ethStatusArea').innerHTML =
+      '<div class="ln-status"><span class="ln-spinner"></span> Switching your wallet to ' + REQUIRED_NAME + '…</div>';
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: REQUIRED_CHAIN }]
+      });
+    } catch (err) {
+      if (err && err.code === 4902) {
+        // Network not in the wallet yet — add it, which also switches to it.
+        const params = CHAIN_PARAMS[REQUIRED_CHAIN];
+        if (!params) throw new Error(REQUIRED_NAME + ' is not available in your wallet.');
+        document.getElementById('ethStatusArea').innerHTML =
+          '<div class="ln-status"><span class="ln-spinner"></span> Adding ' + REQUIRED_NAME + ' to your wallet…</div>';
+        try {
+          await window.ethereum.request({ method: 'wallet_addEthereumChain', params: [params] });
+        } catch (addErr) {
+          if (addErr && addErr.code === 4001) {
+            throw new Error('You declined to add ' + REQUIRED_NAME + '. Add it to pay with ETH.');
+          }
+          throw new Error(addErr && addErr.message ? addErr.message : 'Could not add ' + REQUIRED_NAME + '.');
+        }
+      } else if (err && err.code === 4001) {
+        throw new Error('This store accepts ETH on ' + REQUIRED_NAME + '. Please switch networks to pay.');
+      } else {
+        throw new Error(err && err.message ? err.message : 'Could not switch network.');
+      }
+    }
+
+    chainId = await window.ethereum.request({ method: 'eth_chainId' });
+    if (chainId !== REQUIRED_CHAIN) {
+      throw new Error('Please switch your wallet to ' + REQUIRED_NAME + ' and try again.');
+    }
+    return chainId;
+  }
+
+  async function payWithEth() {
+    const btn = document.getElementById('ethBtn');
+    const area = document.getElementById('ethStatusArea');
+    stopPolling();
+    area.innerHTML = '';
+
+    if (!window.ethereum) {
+      area.innerHTML = '<div class="ln-error">⚠ No Ethereum wallet detected. Install MetaMask (or open this page in your wallet\'s browser) to pay with ETH.</div>';
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '⟠ Connecting wallet…';
+    try {
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      const from = accounts[0];
+      btn.textContent = '⟠ Checking network…';
+      const chainId = await ensureEthNetwork();
+      const netName = (CHAINS[chainId] && CHAINS[chainId].name) || ('chain ' + chainId);
+      const valueHex = ethToWeiHex(currentEth);
+
+      btn.textContent = '⟠ Confirm in wallet…';
+      area.innerHTML = '<div class="ln-status"><span class="ln-spinner"></span> Confirm the ' +
+        currentEth + ' ETH payment in your wallet (' + netName + ')…</div>';
+
+      const txHash = await window.ethereum.request({
+        method: 'eth_sendTransaction',
+        params: [{ from: from, to: ETH_ADDR, value: valueHex }]
+      });
+
+      ethTxHash = txHash;
+      btn.style.display = 'none';
+      showEthPending(txHash, chainId);
+      pollEthReceipt(txHash, chainId);
+    } catch (e) {
+      const msg = (e && e.code === 4001)
+        ? 'Payment rejected in wallet'
+        : (e && e.message ? e.message : 'Transaction failed');
+      area.innerHTML = '<div class="ln-error">⚠ ' + msg + '</div>';
+      btn.disabled = false;
+      btn.style.display = '';
+      btn.textContent = '⟠ Try again';
+    }
+  }
+
+  function showEthPending(txHash, chainId) {
+    const area = document.getElementById('ethStatusArea');
+    const link = explorerTxUrl(chainId, txHash);
+    area.innerHTML =
+      (link ? '<a class="eth-inv-btn" href="' + link + '" target="_blank" rel="noopener">🔍 View transaction on explorer</a>' : '') +
+      '<div class="ln-status" id="ethStatus"><span class="ln-spinner"></span> Transaction sent — waiting for on-chain confirmation…</div>';
+  }
+
+  function pollEthReceipt(txHash, chainId) {
+    let tries = 0;
+    ethPollTimer = setInterval(async () => {
+      tries++;
+      try {
+        const r = await window.ethereum.request({
+          method: 'eth_getTransactionReceipt',
+          params: [txHash]
+        });
+        if (r && r.blockNumber) {
+          stopPolling();
+          onEthDone(txHash, chainId, r.status === '0x1');
+          return;
+        }
+      } catch (e) { /* keep polling */ }
+      if (tries > 120) { // ~6 minutes
+        stopPolling();
+        const s = document.getElementById('ethStatus');
+        if (s) s.innerHTML = '⌛ Still pending — check the explorer link for status';
+      }
+    }, 3000);
+  }
+
+  function onEthDone(txHash, chainId, ok) {
+    if (!ok) {
+      const area = document.getElementById('ethStatusArea');
+      const link = explorerTxUrl(chainId, txHash);
+      area.innerHTML =
+        (link ? '<a class="eth-inv-btn" href="' + link + '" target="_blank" rel="noopener">🔍 View transaction</a>' : '') +
+        '<div class="ln-error">⚠ Transaction failed on-chain</div>';
+      const btn = document.getElementById('ethBtn');
+      btn.disabled = false; btn.style.display = ''; btn.textContent = '⟠ Try again';
+      return;
+    }
+    document.getElementById('payBody').style.display = 'none';
+    const sIcon = document.getElementById('sIcon');
+    sIcon.className = 's-icon s-eth';
+    sIcon.textContent = '✓';
+    document.getElementById('txBox').textContent = 'TX: ' + txHash;
+    document.getElementById('successDiv').classList.add('on');
+  }
+
+  // Reflect the active network in the ETH panel label.
+  document.addEventListener('DOMContentLoaded', function () {
+    const n = document.getElementById('ethNetNote');
+    if (n) n.textContent = '⟠ Pay on ' + REQUIRED_NAME + ' · real on-chain tx';
+  });
 </script>
 </body>
 </html>
