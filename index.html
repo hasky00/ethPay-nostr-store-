@@ -426,6 +426,49 @@
     color: var(--purple-glow); word-break: break-all;
   }
 
+  /* LN INVOICE */
+  #lnInvoiceArea { margin-top: 16px; }
+  .qr-wrap {
+    background: #fff; padding: 12px; border-radius: 12px;
+    width: max-content; margin: 0 auto 14px;
+    box-shadow: 0 0 24px rgba(247,147,26,0.25);
+  }
+  .qr-wrap img, .qr-wrap canvas { display: block; }
+  .inv-string {
+    font-family: 'Space Mono', monospace; font-size: 0.6rem;
+    background: rgba(0,0,0,0.35); border: 1px solid rgba(247,147,26,0.25);
+    border-radius: 8px; padding: 10px 12px; margin-bottom: 12px;
+    color: var(--btc-amber); word-break: break-all; line-height: 1.5;
+    max-height: 70px; overflow-y: auto; cursor: pointer;
+  }
+  .inv-actions { display: flex; gap: 8px; margin-bottom: 14px; }
+  .inv-btn {
+    flex: 1; text-align: center; text-decoration: none;
+    border: 1px solid rgba(247,147,26,0.3); background: rgba(247,147,26,0.08);
+    color: var(--btc-amber); padding: 10px; border-radius: 8px;
+    font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 0.78rem;
+    cursor: pointer; transition: all 0.2s;
+  }
+  .inv-btn:hover { background: rgba(247,147,26,0.18); }
+  .ln-status {
+    font-family: 'Space Mono', monospace; font-size: 0.72rem;
+    text-align: center; color: var(--gray);
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  .ln-status.paid { color: var(--btc-amber); }
+  .ln-spinner {
+    width: 12px; height: 12px; border: 2px solid rgba(247,147,26,0.3);
+    border-top-color: var(--btc-orange); border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .ln-error {
+    font-family: 'Space Mono', monospace; font-size: 0.72rem;
+    color: #fca5a5; background: rgba(220,38,38,0.1);
+    border: 1px solid rgba(220,38,38,0.3); border-radius: 8px;
+    padding: 10px 12px; margin-top: 12px; line-height: 1.5;
+  }
+
   /* FOOTER */
   footer {
     border-top: 1px solid var(--border);
@@ -654,10 +697,11 @@
           <span class="lbl">Amount</span>
           <span class="amt amt-btc" id="mSats">25,000 sats</span>
         </div>
-        <div class="relay-note">⚡ Payment event broadcast to 12 Nostr relays</div>
-        <button class="pay-action btc-action" id="lnBtn" onclick="simulatePay('btc')">
-          ⚡ Send Sats via Lightning
+        <div class="relay-note">⚡ Real Lightning invoice via LNURL-pay</div>
+        <button class="pay-action btc-action" id="lnBtn" onclick="payWithLightning()">
+          ⚡ Generate Lightning Invoice
         </button>
+        <div id="lnInvoiceArea"></div>
       </div>
 
       <!-- ETH PANEL -->
@@ -690,16 +734,21 @@
   </div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
   const LN = 'erna@getalby.com';
   const ETH_ADDR = '0x1E7c6338431d1C6326053F9355eb1812A8b673BF';
   let currentTab = 'btc';
+  let currentSats = 0;
+  let currentInvoice = '';
+  let lnPollTimer = null;
 
   function openModal(name, icon, sats, eth, tab) {
     document.getElementById('mName').textContent = name;
     document.getElementById('mIcon').textContent = icon;
     document.getElementById('mSats').textContent = sats + ' sats';
     document.getElementById('mEth').textContent = eth + ' ETH';
+    currentSats = parseInt(String(sats).replace(/[^0-9]/g, ''), 10) || 0;
     document.getElementById('payBody').style.display = 'block';
     document.getElementById('successDiv').classList.remove('on');
     resetBtns();
@@ -716,6 +765,7 @@
   }
 
   function closeModal() {
+    stopPolling();
     document.getElementById('overlay').classList.remove('on');
   }
 
@@ -723,30 +773,150 @@
     if (e.target === document.getElementById('overlay')) closeModal();
   }
 
-  function resetBtns() {
-    const lb = document.getElementById('lnBtn');
-    const eb = document.getElementById('ethBtn');
-    lb.textContent = '⚡ Send Sats via Lightning';
-    eb.textContent = '⟠ Connect Wallet & Pay';
-    lb.disabled = false; eb.disabled = false;
+  function stopPolling() {
+    if (lnPollTimer) { clearInterval(lnPollTimer); lnPollTimer = null; }
   }
 
+  function resetBtns() {
+    stopPolling();
+    const lb = document.getElementById('lnBtn');
+    const eb = document.getElementById('ethBtn');
+    lb.textContent = '⚡ Generate Lightning Invoice';
+    eb.textContent = '⟠ Connect Wallet & Pay';
+    lb.disabled = false; eb.disabled = false;
+    lb.style.display = '';
+    currentInvoice = '';
+    document.getElementById('lnInvoiceArea').innerHTML = '';
+  }
+
+  /* ---------- REAL LIGHTNING (LNURL-pay, LUD-16 + LUD-21) ---------- */
+
+  async function fetchLnurlPay(address) {
+    const [name, domain] = address.split('@');
+    if (!name || !domain) throw new Error('Invalid Lightning Address');
+    const res = await fetch(`https://${domain}/.well-known/lnurlp/${name}`);
+    if (!res.ok) throw new Error('Could not reach Lightning provider (' + res.status + ')');
+    const data = await res.json();
+    if (data.tag !== 'payRequest') throw new Error('Address does not support payments');
+    return data;
+  }
+
+  async function requestInvoice(lnurlData, sats) {
+    const msat = sats * 1000;
+    if (msat < lnurlData.minSendable || msat > lnurlData.maxSendable) {
+      throw new Error('Amount must be ' + (lnurlData.minSendable/1000).toLocaleString() +
+        '–' + (lnurlData.maxSendable/1000).toLocaleString() + ' sats');
+    }
+    const cb = new URL(lnurlData.callback);
+    cb.searchParams.set('amount', msat);
+    const res = await fetch(cb.toString());
+    if (!res.ok) throw new Error('Invoice request failed (' + res.status + ')');
+    const inv = await res.json();
+    if (inv.status === 'ERROR') throw new Error(inv.reason || 'Provider rejected the request');
+    if (!inv.pr) throw new Error('No invoice returned');
+    return inv; // { pr, verify?, routes }
+  }
+
+  async function payWithLightning() {
+    const btn = document.getElementById('lnBtn');
+    const area = document.getElementById('lnInvoiceArea');
+    stopPolling();
+    area.innerHTML = '';
+    btn.disabled = true;
+    btn.textContent = '⚡ Requesting invoice…';
+    try {
+      const lnurlData = await fetchLnurlPay(LN);
+      const inv = await requestInvoice(lnurlData, currentSats);
+      currentInvoice = inv.pr;
+      renderInvoice(inv.pr);
+      btn.style.display = 'none';
+      if (inv.verify) {
+        startVerifyPolling(inv.verify);
+      } else {
+        const s = document.getElementById('lnStatus');
+        if (s) s.innerHTML = '⏳ Invoice ready — confirm in your wallet (auto-detect unavailable for this provider)';
+      }
+    } catch (e) {
+      area.innerHTML = '<div class="ln-error">⚠ ' + e.message + '</div>';
+      btn.disabled = false;
+      btn.style.display = '';
+      btn.textContent = '⚡ Try again';
+    }
+  }
+
+  function renderInvoice(pr) {
+    const area = document.getElementById('lnInvoiceArea');
+    area.innerHTML =
+      '<div class="qr-wrap"><div id="qrcode"></div></div>' +
+      '<div class="inv-string" id="invStr" onclick="copyInvoice()" title="Click to copy">' + pr + '</div>' +
+      '<div class="inv-actions">' +
+        '<button class="inv-btn" onclick="copyInvoice()">📋 Copy invoice</button>' +
+        '<a class="inv-btn" href="lightning:' + pr + '">⚡ Open in wallet</a>' +
+      '</div>' +
+      '<div class="ln-status" id="lnStatus"><span class="ln-spinner"></span> Waiting for payment…</div>';
+    new QRCode(document.getElementById('qrcode'), {
+      text: pr.toUpperCase(),
+      width: 200, height: 200,
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  }
+
+  function copyInvoice() {
+    if (!currentInvoice) return;
+    navigator.clipboard.writeText(currentInvoice).then(() => {
+      const s = document.getElementById('lnStatus');
+      if (s && !s.classList.contains('paid')) {
+        const prev = s.innerHTML;
+        s.innerHTML = '✓ Invoice copied';
+        setTimeout(() => { if (!s.classList.contains('paid')) s.innerHTML = prev; }, 1500);
+      }
+    });
+  }
+
+  function startVerifyPolling(verifyUrl) {
+    let tries = 0;
+    lnPollTimer = setInterval(async () => {
+      tries++;
+      try {
+        const res = await fetch(verifyUrl);
+        const d = await res.json();
+        if (d.settled === true) {
+          stopPolling();
+          onLightningPaid();
+          return;
+        }
+      } catch (e) { /* keep polling */ }
+      if (tries > 150) { // ~5 minutes
+        stopPolling();
+        const s = document.getElementById('lnStatus');
+        if (s) s.innerHTML = '⌛ Invoice expired — generate a new one';
+      }
+    }, 2000);
+  }
+
+  function onLightningPaid() {
+    document.getElementById('payBody').style.display = 'none';
+    const sIcon = document.getElementById('sIcon');
+    sIcon.className = 's-icon s-btc';
+    sIcon.textContent = '✓';
+    document.getElementById('txBox').textContent = 'Invoice: ' + currentInvoice;
+    document.getElementById('successDiv').classList.add('on');
+  }
+
+  /* ---------- ETH (unchanged demo flow) ---------- */
   function simulatePay(type) {
-    const btn = type === 'btc' ? document.getElementById('lnBtn') : document.getElementById('ethBtn');
-    btn.textContent = type === 'btc' ? '⚡ Broadcasting...' : '⟠ Connecting wallet...';
+    const btn = document.getElementById('ethBtn');
+    btn.textContent = '⟠ Connecting wallet...';
     btn.disabled = true;
 
     setTimeout(() => {
       document.getElementById('payBody').style.display = 'none';
       const sIcon = document.getElementById('sIcon');
-      sIcon.className = 's-icon ' + (type==='btc' ? 's-btc' : 's-eth');
+      sIcon.className = 's-icon s-eth';
       sIcon.textContent = '✓';
 
-      const hash = type === 'btc'
-        ? 'lnbc' + Math.random().toString(36).substr(2,40)
-        : '0x' + Array.from({length:64},()=>'0123456789abcdef'[Math.floor(Math.random()*16)]).join('');
-
-      document.getElementById('txBox').textContent = (type==='btc'?'Invoice: ':'TX: ') + hash;
+      const hash = '0x' + Array.from({length:64},()=>'0123456789abcdef'[Math.floor(Math.random()*16)]).join('');
+      document.getElementById('txBox').textContent = 'TX: ' + hash;
       document.getElementById('successDiv').classList.add('on');
     }, 2000);
   }
